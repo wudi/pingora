@@ -46,6 +46,10 @@ impl CacheTraceCTX {
         self.cache_span = cache_span;
     }
 
+    pub fn get_cache_span(&self) -> SpanHandle {
+        self.cache_span.handle()
+    }
+
     #[inline]
     pub fn child(&self, name: &'static str) -> Span {
         self.cache_span.child(name, |o| o.start())
@@ -70,18 +74,22 @@ impl CacheTraceCTX {
             .set_tag(|| Tag::new("status", hit_status.as_str()));
     }
 
+    pub fn get_hit_span(&self) -> SpanHandle {
+        self.hit_span.handle()
+    }
+
     pub fn finish_hit_span(&mut self) {
         self.hit_span.set_finish_time(SystemTime::now);
     }
 
-    pub fn log_meta(&mut self, meta: &CacheMeta) {
+    fn log_meta(span: &mut Span, meta: &CacheMeta) {
         fn ts2epoch(ts: SystemTime) -> f64 {
             ts.duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap_or_default() // should never overflow but be safe here
                 .as_secs_f64()
         }
         let internal = &meta.0.internal;
-        self.hit_span.set_tags(|| {
+        span.set_tags(|| {
             [
                 Tag::new("created", ts2epoch(internal.created)),
                 Tag::new("fresh_until", ts2epoch(internal.fresh_until)),
@@ -94,5 +102,13 @@ impl CacheTraceCTX {
                 Tag::new("variance", internal.variance.is_some()),
             ]
         });
+    }
+
+    pub fn log_meta_in_hit_span(&mut self, meta: &CacheMeta) {
+        CacheTraceCTX::log_meta(&mut self.hit_span, meta);
+    }
+
+    pub fn log_meta_in_miss_span(&mut self, meta: &CacheMeta) {
+        CacheTraceCTX::log_meta(&mut self.miss_span, meta);
     }
 }

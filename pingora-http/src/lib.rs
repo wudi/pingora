@@ -30,7 +30,6 @@ use http::response::Builder as RespBuilder;
 use http::response::Parts as RespParts;
 use http::uri::Uri;
 use pingora_error::{ErrorType::*, OrErr, Result};
-use std::convert::TryInto;
 use std::ops::Deref;
 
 pub use http::method::Method;
@@ -70,6 +69,8 @@ pub struct RequestHeader {
     header_name_map: Option<CaseMap>,
     // store the raw path bytes only if it is invalid utf-8
     raw_path_fallback: Vec<u8>, // can also be Box<[u8]>
+    // whether we send END_STREAM with HEADERS for h2 requests
+    send_end_stream: bool,
 }
 
 impl AsRef<ReqParts> for RequestHeader {
@@ -94,6 +95,7 @@ impl RequestHeader {
             base,
             header_name_map: None,
             raw_path_fallback: vec![],
+            send_end_stream: true,
         }
     }
 
@@ -149,7 +151,7 @@ impl RequestHeader {
 
     /// Append the header name and value to `self`.
     ///
-    /// If there are already some header under the same name, a new value will be added without
+    /// If there are already some headers under the same name, a new value will be added without
     /// any others being removed.
     pub fn append_header(
         &mut self,
@@ -170,7 +172,7 @@ impl RequestHeader {
     /// Insert the header name and value to `self`.
     ///
     /// Different from [Self::append_header()], this method will replace all other existing headers
-    /// under the same name (case insensitive).
+    /// under the same name (case-insensitive).
     pub fn insert_header(
         &mut self,
         name: impl IntoCaseHeaderName,
@@ -210,6 +212,20 @@ impl RequestHeader {
     /// Set the request URI
     pub fn set_uri(&mut self, uri: http::Uri) {
         self.base.uri = uri;
+    }
+
+    /// Set whether we send an END_STREAM on H2 request HEADERS if body is empty.
+    pub fn set_send_end_stream(&mut self, send_end_stream: bool) {
+        self.send_end_stream = send_end_stream;
+    }
+
+    /// Returns if we support sending an END_STREAM on H2 request HEADERS if body is empty,
+    /// returns None if not H2.
+    pub fn send_end_stream(&self) -> Option<bool> {
+        if self.base.version != Version::HTTP_2 {
+            return None;
+        }
+        Some(self.send_end_stream)
     }
 
     /// Return the request path in its raw format
@@ -257,6 +273,7 @@ impl Clone for RequestHeader {
             base: self.as_owned_parts(),
             header_name_map: self.header_name_map.clone(),
             raw_path_fallback: self.raw_path_fallback.clone(),
+            send_end_stream: self.send_end_stream,
         }
     }
 }
@@ -269,6 +286,7 @@ impl From<ReqParts> for RequestHeader {
             header_name_map: None,
             // no illegal path
             raw_path_fallback: vec![],
+            send_end_stream: true,
         }
     }
 }
@@ -289,6 +307,8 @@ pub struct ResponseHeader {
     base: RespParts,
     // an ordered header map to store the original case of each header name
     header_name_map: Option<CaseMap>,
+    // the reason phrase of the response, if unset, a default one will be used
+    reason_phrase: Option<String>,
 }
 
 impl AsRef<RespParts> for ResponseHeader {
@@ -310,6 +330,7 @@ impl Clone for ResponseHeader {
         Self {
             base: self.as_owned_parts(),
             header_name_map: self.header_name_map.clone(),
+            reason_phrase: self.reason_phrase.clone(),
         }
     }
 }
@@ -320,6 +341,7 @@ impl From<RespParts> for ResponseHeader {
         Self {
             base: parts,
             header_name_map: None,
+            reason_phrase: None,
         }
     }
 }
@@ -351,6 +373,7 @@ impl ResponseHeader {
         ResponseHeader {
             base,
             header_name_map: None,
+            reason_phrase: None,
         }
     }
 
@@ -378,7 +401,7 @@ impl ResponseHeader {
 
     /// Append the header name and value to `self`.
     ///
-    /// If there are already some header under the same name, a new value will be added without
+    /// If there are already some headers under the same name, a new value will be added without
     /// any others being removed.
     pub fn append_header(
         &mut self,
@@ -444,9 +467,35 @@ impl ResponseHeader {
         self.base.version = version
     }
 
+    /// Set the HTTP reason phase. If `None`, a default reason phase will be used
+    pub fn set_reason_phrase(&mut self, reason_phrase: Option<&str>) -> Result<()> {
+        // No need to allocate memory to store the phrase if it is the default one.
+        if reason_phrase == self.base.status.canonical_reason() {
+            self.reason_phrase = None;
+            return Ok(());
+        }
+
+        // TODO: validate it "*( HTAB / SP / VCHAR / obs-text )"
+        self.reason_phrase = reason_phrase.map(str::to_string);
+        Ok(())
+    }
+
+    /// Get the HTTP reason phase. If [Self::set_reason_phrase()] is never called
+    /// or set to `None`, a default reason phase will be used
+    pub fn get_reason_phrase(&self) -> Option<&str> {
+        self.reason_phrase
+            .as_deref()
+            .or_else(|| self.base.status.canonical_reason())
+    }
+
     /// Clone `self` into [http::response::Parts].
     pub fn as_owned_parts(&self) -> RespParts {
         clone_resp_parts(&self.base)
+    }
+
+    /// Helper function to set the HTTP content length on the response header.
+    pub fn set_content_length(&mut self, len: usize) -> Result<()> {
+        self.insert_header(http::header::CONTENT_LENGTH, len)
     }
 }
 
@@ -477,7 +526,7 @@ fn clone_resp_parts(me: &RespParts) -> RespParts {
 
 // This function returns an upper bound on the size of the header map used inside the http crate.
 // As of version 0.2, there is a limit of 1 << 15 (32,768) items inside the map. There is an
-// assertion against this size inside the crate so we want to avoid panicking by not exceeding this
+// assertion against this size inside the crate, so we want to avoid panicking by not exceeding this
 // upper bound.
 fn http_header_map_upper_bound(size_hint: Option<usize>) -> usize {
     // Even though the crate has 1 << 15 as the max size, calls to `with_capacity` invoke a
@@ -485,13 +534,13 @@ fn http_header_map_upper_bound(size_hint: Option<usize>) -> usize {
     //
     // See https://github.com/hyperium/http/blob/34a9d6bdab027948d6dea3b36d994f9cbaf96f75/src/header/map.rs#L3220
     //
-    // Therefore we set our max size to be even lower so we guarantee ourselves we won't hit that
+    // Therefore we set our max size to be even lower, so we guarantee ourselves we won't hit that
     // upper bound in the crate. Any way you cut it, 4,096 headers is insane.
     const PINGORA_MAX_HEADER_COUNT: usize = 4096;
     const INIT_HEADER_SIZE: usize = 8;
 
-    // We select the size hint or the max size here such that we pick a value substantially lower
-    // 1 << 15 with room to grow the header map.
+    // We select the size hint or the max size here, ensuring that we pick a value substantially lower
+    // than 1 << 15 with room to grow the header map.
     std::cmp::min(
         size_hint.unwrap_or(INIT_HEADER_SIZE),
         PINGORA_MAX_HEADER_COUNT,
@@ -510,7 +559,7 @@ fn append_header_value<T>(
         .as_slice()
         .try_into()
         .or_err(InvalidHTTPHeader, "invalid header name")?;
-    // storage the original case in the map
+    // store the original case in the map
     if let Some(name_map) = name_map {
         name_map.append(header_name.clone(), case_header_name);
     }
@@ -531,7 +580,7 @@ fn insert_header_value<T>(
         .try_into()
         .or_err(InvalidHTTPHeader, "invalid header name")?;
     if let Some(name_map) = name_map {
-        // storage the original case in the map
+        // store the original case in the map
         name_map.insert(header_name.clone(), case_header_name);
     }
     value_map.insert(header_name, value);
@@ -548,10 +597,13 @@ fn remove_header<'a, T, N: ?Sized>(
 where
     &'a N: 'a + AsHeaderName,
 {
-    if let Some(name_map) = name_map {
-        name_map.remove(name);
+    let removed = value_map.remove(name);
+    if removed.is_some() {
+        if let Some(name_map) = name_map {
+            name_map.remove(name);
+        }
     }
-    value_map.remove(name)
+    removed
 }
 
 #[inline]
@@ -563,7 +615,7 @@ fn header_to_h1_wire(key_map: Option<&CaseMap>, value_map: &HMap, buf: &mut impl
         let iter = key_map.iter().zip(value_map.iter());
         for ((header, case_header), (header2, val)) in iter {
             if header != header2 {
-                // in case the header iter order changes in further version of HMap
+                // in case the header iteration order changes in future versions of HMap
                 panic!("header iter mismatch {}, {}", header, header2)
             }
             buf.put_slice(case_header.as_slice());
@@ -668,5 +720,57 @@ mod tests {
         let req = RequestHeader::build("GET", &raw_path[..], None).unwrap();
         assert_eq!("Hello�World", req.uri.path_and_query().unwrap());
         assert_eq!(raw_path, req.raw_path());
+    }
+
+    #[test]
+    fn test_reason_phrase() {
+        let mut resp = ResponseHeader::new(None);
+        let reason = resp.get_reason_phrase().unwrap();
+        assert_eq!(reason, "OK");
+
+        resp.set_reason_phrase(Some("FooBar")).unwrap();
+        let reason = resp.get_reason_phrase().unwrap();
+        assert_eq!(reason, "FooBar");
+
+        resp.set_reason_phrase(Some("OK")).unwrap();
+        let reason = resp.get_reason_phrase().unwrap();
+        assert_eq!(reason, "OK");
+
+        resp.set_reason_phrase(None).unwrap();
+        let reason = resp.get_reason_phrase().unwrap();
+        assert_eq!(reason, "OK");
+    }
+
+    #[test]
+    fn set_test_send_end_stream() {
+        let mut req = RequestHeader::build("GET", b"/", None).unwrap();
+        req.set_send_end_stream(true);
+
+        // None for requests that are not h2
+        assert!(req.send_end_stream().is_none());
+
+        let mut req = RequestHeader::build("GET", b"/", None).unwrap();
+        req.set_version(Version::HTTP_2);
+
+        // Some(true) by default for h2
+        assert!(req.send_end_stream().unwrap());
+
+        req.set_send_end_stream(false);
+        // Some(false)
+        assert!(!req.send_end_stream().unwrap());
+    }
+
+    #[test]
+    fn set_test_set_content_length() {
+        let mut resp = ResponseHeader::new(None);
+        resp.set_content_length(10).unwrap();
+
+        assert_eq!(
+            b"10",
+            resp.headers
+                .get(http::header::CONTENT_LENGTH)
+                .map(|d| d.as_bytes())
+                .unwrap()
+        );
     }
 }

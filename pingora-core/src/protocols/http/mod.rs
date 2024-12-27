@@ -15,8 +15,10 @@
 //! HTTP/1.x and HTTP/2 implementation APIs
 
 mod body_buffer;
+pub mod bridge;
 pub mod client;
 pub mod compression;
+pub mod conditional_filter;
 pub(crate) mod date;
 pub mod error_resp;
 pub mod server;
@@ -39,7 +41,7 @@ pub enum HttpTask {
     Trailer(Option<Box<http::HeaderMap>>),
     /// Signal that the response is already finished
     Done,
-    /// Signal that the reading of the response encounters errors.
+    /// Signal that the reading of the response encountered errors.
     Failed(pingora_error::BError),
 }
 

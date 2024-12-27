@@ -54,6 +54,7 @@ unsafe fn gid_for_username(name: &CString) -> Option<libc::gid_t> {
 }
 
 /// Start a server instance as a daemon.
+#[cfg(unix)]
 pub fn daemonize(conf: &ServerConf) {
     // TODO: customize working dir
 
@@ -83,6 +84,8 @@ pub fn daemonize(conf: &ServerConf) {
 
             #[cfg(target_os = "macos")]
             let group_id = unsafe { gid_for_username(&user_cstr).map(|gid| gid as i32) };
+            #[cfg(target_os = "freebsd")]
+            let group_id = unsafe { gid_for_username(&user_cstr).map(|gid| gid as u32) };
             #[cfg(target_os = "linux")]
             let group_id = unsafe { gid_for_username(&user_cstr) };
 

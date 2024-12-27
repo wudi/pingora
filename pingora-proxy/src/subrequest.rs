@@ -17,7 +17,10 @@ use core::pin::Pin;
 use core::task::{Context, Poll};
 use pingora_cache::lock::WritePermit;
 use pingora_core::protocols::raw_connect::ProxyDigest;
-use pingora_core::protocols::{GetProxyDigest, GetTimingDigest, Ssl, TimingDigest, UniqueID};
+use pingora_core::protocols::{
+    GetProxyDigest, GetSocketDigest, GetTimingDigest, Peek, SocketDigest, Ssl, TimingDigest,
+    UniqueID, UniqueIDType,
+};
 use std::io::Cursor;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite, Error, ReadBuf};
@@ -66,7 +69,7 @@ impl AsyncWrite for DummyIO {
 }
 
 impl UniqueID for DummyIO {
-    fn id(&self) -> i32 {
+    fn id(&self) -> UniqueIDType {
         0 // placeholder
     }
 }
@@ -84,6 +87,14 @@ impl GetProxyDigest for DummyIO {
         None
     }
 }
+
+impl GetSocketDigest for DummyIO {
+    fn get_socket_digest(&self) -> Option<Arc<SocketDigest>> {
+        None
+    }
+}
+
+impl Peek for DummyIO {}
 
 #[async_trait]
 impl pingora_core::protocols::Shutdown for DummyIO {
@@ -113,7 +124,7 @@ pub(crate) struct Ctx {
 
 use crate::HttpSession;
 
-pub(crate) fn create_dummy_session(parsed_session: &HttpSession) -> HttpSession {
+pub fn create_dummy_session(parsed_session: &HttpSession) -> HttpSession {
     // TODO: check if there is req body, we don't capture the body for now
     HttpSession::new_http1(Box::new(DummyIO::new(&parsed_session.to_h1_raw())))
 }

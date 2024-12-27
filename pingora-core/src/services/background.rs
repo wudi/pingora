@@ -23,10 +23,12 @@ use async_trait::async_trait;
 use std::sync::Arc;
 
 use super::Service;
-use crate::server::{ListenFds, ShutdownWatch};
+#[cfg(unix)]
+use crate::server::ListenFds;
+use crate::server::ShutdownWatch;
 
 /// The background service interface
-#[cfg_attr(not(doc_async_trait), async_trait)]
+#[async_trait]
 pub trait BackgroundService {
     /// This function is called when the pingora server tries to start all the
     /// services. The background service can return at anytime or wait for the
@@ -65,7 +67,11 @@ impl<A> Service for GenBackgroundService<A>
 where
     A: BackgroundService + Send + Sync + 'static,
 {
-    async fn start_service(&mut self, _fds: Option<ListenFds>, shutdown: ShutdownWatch) {
+    async fn start_service(
+        &mut self,
+        #[cfg(unix)] _fds: Option<ListenFds>,
+        shutdown: ShutdownWatch,
+    ) {
         self.task.start(shutdown).await;
     }
 

@@ -25,7 +25,7 @@ pub use read_through::{Lookup, MultiLookup, RTCache};
 #[derive(Debug, PartialEq, Eq)]
 /// [CacheStatus] indicates the response type for a query.
 pub enum CacheStatus {
-    /// The key was found in cache
+    /// The key was found in the cache
     Hit,
     /// The key was not found.
     Miss,
@@ -43,6 +43,14 @@ impl CacheStatus {
             Self::Miss => "miss",
             Self::Expired => "expired",
             Self::LockHit => "lock_hit",
+        }
+    }
+
+    /// Returns whether this status represents a cache hit.
+    pub fn is_hit(&self) -> bool {
+        match self {
+            CacheStatus::Hit | CacheStatus::LockHit => true,
+            CacheStatus::Miss | CacheStatus::Expired => false,
         }
     }
 }
@@ -81,7 +89,7 @@ pub struct MemoryCache<K: Hash, T: Clone> {
     pub(crate) hasher: RandomState,
 }
 
-impl<K: Hash, T: Clone + Send + Sync> MemoryCache<K, T> {
+impl<K: Hash, T: Clone + Send + Sync + 'static> MemoryCache<K, T> {
     /// Create a new [MemoryCache] with the given size.
     pub fn new(size: usize) -> Self {
         MemoryCache {
@@ -109,7 +117,7 @@ impl<K: Hash, T: Clone + Send + Sync> MemoryCache<K, T> {
 
     /// Insert a key and value pair with an optional TTL into the cache.
     ///
-    /// An item with zero TTL of zero not inserted.
+    /// An item with zero TTL of zero will not be inserted.
     pub fn put(&self, key: &K, value: T, ttl: Option<Duration>) {
         if let Some(t) = ttl {
             if t.is_zero() {
@@ -120,6 +128,12 @@ impl<K: Hash, T: Clone + Send + Sync> MemoryCache<K, T> {
         let node = Node::new(value, ttl);
         // weight is always 1 for now
         self.store.put(hashed_key, node, 1);
+    }
+
+    /// Remove a key from the cache if it exists.
+    pub fn remove(&self, key: &K) {
+        let hashed_key = self.hasher.hash_one(key);
+        self.store.remove(&hashed_key);
     }
 
     pub(crate) fn force_put(&self, key: &K, value: T, ttl: Option<Duration>) {
@@ -190,6 +204,31 @@ mod tests {
         cache.put(&1, 2, None);
         let (res, hit) = cache.get(&1);
         assert_eq!(res.unwrap(), 2);
+        assert_eq!(hit, CacheStatus::Hit);
+    }
+
+    #[test]
+    fn test_put_get_remove() {
+        let cache: MemoryCache<i32, i32> = MemoryCache::new(10);
+        let (res, hit) = cache.get(&1);
+        assert_eq!(res, None);
+        assert_eq!(hit, CacheStatus::Miss);
+        cache.put(&1, 2, None);
+        cache.put(&3, 4, None);
+        cache.put(&5, 6, None);
+        let (res, hit) = cache.get(&1);
+        assert_eq!(res.unwrap(), 2);
+        assert_eq!(hit, CacheStatus::Hit);
+        cache.remove(&1);
+        cache.remove(&3);
+        let (res, hit) = cache.get(&1);
+        assert_eq!(res, None);
+        assert_eq!(hit, CacheStatus::Miss);
+        let (res, hit) = cache.get(&3);
+        assert_eq!(res, None);
+        assert_eq!(hit, CacheStatus::Miss);
+        let (res, hit) = cache.get(&5);
+        assert_eq!(res.unwrap(), 6);
         assert_eq!(hit, CacheStatus::Hit);
     }
 

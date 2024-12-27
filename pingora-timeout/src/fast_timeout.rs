@@ -50,7 +50,7 @@ fn check_clock_thread(tm: &Arc<TimerManager>) {
 pub struct FastTimeout(Duration);
 
 impl ToTimeout for FastTimeout {
-    fn timeout(&self) -> BoxFuture<'static, ()> {
+    fn timeout(&self) -> Pin<Box<dyn Future<Output = ()> + Send + Sync>> {
         Box::pin(TIMER_MANAGER.register_timer(self.0).poll())
     }
 
@@ -94,7 +94,6 @@ pub fn unpause() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     #[tokio::test]
     async fn test_timeout() {
